@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -49,11 +50,13 @@ class IamportWebView extends StatefulWidget {
   _IamportWebViewState createState() => _IamportWebViewState();
 }
 
-class _IamportWebViewState extends State<IamportWebView> {
+class _IamportWebViewState extends State<IamportWebView>
+    with WidgetsBindingObserver {
   late WebViewController _webViewController;
   StreamSubscription? _sub;
   late int _isWebviewLoaded;
   late int _isImpLoaded;
+  bool _isInProgress = false;
 
   @override
   void initState() {
@@ -66,73 +69,105 @@ class _IamportWebViewState extends State<IamportWebView> {
     if (widget.initialChild != null) {
       _isWebviewLoaded++;
     }
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
     if (_sub != null) _sub!.cancel();
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: widget.appBar,
-      body: SafeArea(
-        child: IndexedStack(
-          index: _isWebviewLoaded,
-          children: [
-            WebView(
-              initialUrl:
-                  Uri.dataFromString(IamportWebView.html, mimeType: 'text/html')
-                      .toString(),
-              javascriptMode: JavascriptMode.unrestricted,
-              gestureRecognizers: widget.gestureRecognizers,
-              userAgent: widget.customUserAgent,
-              onWebViewCreated: (controller) {
-                this._webViewController = controller;
-                if (widget.type == ActionType.payment) {
-                  // 스마일페이, 나이스 실시간 계좌이체
-                  _sub = widget.customPGAction(this._webViewController);
-                }
-              },
-              onPageFinished: (String url) {
-                // 웹뷰 로딩 완료시에 화면 전환
-                if (_isWebviewLoaded == 1) {
-                  setState(() {
-                    _isWebviewLoaded = 0;
-                  });
-                }
-                // 페이지 로딩 완료시 IMP 코드 실행
-                if (_isImpLoaded == 0) {
-                  widget.executeJS(this._webViewController);
-                  _isImpLoaded++;
-                }
-              },
-              navigationDelegate: (request) async {
-                // print("url: " + request.url);
-                if (widget.isPaymentOver(request.url)) {
-                  String decodedUrl = Uri.decodeComponent(request.url);
-                  widget.useQueryData(Uri.parse(decodedUrl).queryParameters);
-
-                  return NavigationDecision.prevent;
-                }
-
-                final iamportUrl = IamportUrl(request.url);
-                if (iamportUrl.isAppLink()) {
-                  // print("appLink: " + iamportUrl.appUrl!);
-                  // 앱 실행 로직을 iamport_url 모듈로 이동
-                  iamportUrl.launchApp();
-                  return NavigationDecision.prevent;
-                }
-
-                return NavigationDecision.navigate;
-              },
-            ),
-            if (_isWebviewLoaded == 1) widget.initialChild!,
-          ],
-        ),
-      ),
-    );
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _shouldReloadWebView();
+    }
   }
+
+  Future<void> _shouldReloadWebView() async {
+    if (Platform.isAndroid) {
+      try {
+        var androidInfo = await DeviceInfoPlugin().androidInfo;
+        var sdkInt = androidInfo.version.sdkInt;
+        var manufacturer = androidInfo.manufacturer;
+
+        if (sdkInt == 34 && manufacturer == 'samsung') {
+          setState(() {
+            _isInProgress = true;
+          });
+
+          Future.delayed(const Duration(milliseconds: 100), () {
+            setState(() {
+              _isInProgress = false;
+            });
+          });
+        }
+      } catch (_) {}
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => _isInProgress
+      ? const SizedBox.shrink()
+      : Scaffold(
+          appBar: widget.appBar,
+          body: SafeArea(
+            child: IndexedStack(
+              index: _isWebviewLoaded,
+              children: [
+                WebView(
+                  initialUrl: Uri.dataFromString(IamportWebView.html,
+                          mimeType: 'text/html')
+                      .toString(),
+                  javascriptMode: JavascriptMode.unrestricted,
+                  gestureRecognizers: widget.gestureRecognizers,
+                  userAgent: widget.customUserAgent,
+                  onWebViewCreated: (controller) {
+                    this._webViewController = controller;
+                    if (widget.type == ActionType.payment) {
+                      // 스마일페이, 나이스 실시간 계좌이체
+                      _sub = widget.customPGAction(this._webViewController);
+                    }
+                  },
+                  onPageFinished: (String url) {
+                    // 웹뷰 로딩 완료시에 화면 전환
+                    if (_isWebviewLoaded == 1) {
+                      setState(() {
+                        _isWebviewLoaded = 0;
+                      });
+                    }
+                    // 페이지 로딩 완료시 IMP 코드 실행
+                    if (_isImpLoaded == 0) {
+                      widget.executeJS(this._webViewController);
+                      _isImpLoaded++;
+                    }
+                  },
+                  navigationDelegate: (request) async {
+                    // print("url: " + request.url);
+                    if (widget.isPaymentOver(request.url)) {
+                      String decodedUrl = Uri.decodeComponent(request.url);
+                      widget
+                          .useQueryData(Uri.parse(decodedUrl).queryParameters);
+
+                      return NavigationDecision.prevent;
+                    }
+
+                    final iamportUrl = IamportUrl(request.url);
+                    if (iamportUrl.isAppLink()) {
+                      // print("appLink: " + iamportUrl.appUrl!);
+                      // 앱 실행 로직을 iamport_url 모듈로 이동
+                      iamportUrl.launchApp();
+                      return NavigationDecision.prevent;
+                    }
+
+                    return NavigationDecision.navigate;
+                  },
+                ),
+                if (_isWebviewLoaded == 1) widget.initialChild!,
+              ],
+            ),
+          ),
+        );
 }
