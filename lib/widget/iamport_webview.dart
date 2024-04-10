@@ -5,6 +5,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:iamport_flutter/model/iamport_url.dart';
 import 'package:iamport_webview_flutter/iamport_webview_flutter.dart';
 
@@ -56,7 +57,7 @@ class _IamportWebViewState extends State<IamportWebView>
   StreamSubscription? _sub;
   late int _isWebviewLoaded;
   late int _isImpLoaded;
-  bool _isInProgress = false;
+  bool isLandscape = false;
 
   @override
   void initState() {
@@ -80,94 +81,110 @@ class _IamportWebViewState extends State<IamportWebView>
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _shouldReloadWebView();
+  void didChangeAppLifecycleState(AppLifecycleState state) async {
+    if (await _isSamsungIssueDevice()) {
+      if (state == AppLifecycleState.resumed) {
+        _showPortrait();
+      } else if (state == AppLifecycleState.hidden) {
+        _shouldLandScape();
+      }
     }
   }
 
-  Future<void> _shouldReloadWebView() async {
+  Future<bool> _isSamsungIssueDevice() async {
     if (Platform.isAndroid) {
+      /// DeviceInfoPlugin 을 사용하면 sdkIn 34, manufacturer samsung 일 경우에만 적용되도록 처리 가능합니다.
+      /// (모든 Android 기기에서 이슈에 대한 처리를 하는 것은 비효율적이기 때문입니다.)
       try {
         var androidInfo = await DeviceInfoPlugin().androidInfo;
         var sdkInt = androidInfo.version.sdkInt;
         var manufacturer = androidInfo.manufacturer;
-
         if (sdkInt == 34 && manufacturer == 'samsung') {
-          setState(() {
-            _isInProgress = true;
-          });
-
-          Future.delayed(const Duration(milliseconds: 100), () {
-            setState(() {
-              _isInProgress = false;
-            });
-          });
+          return true;
         }
       } catch (_) {}
+      return true;
     }
+    return false;
+  }
+
+  Future<void> _shouldLandScape() async {
+    SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft]);
+    Future.delayed(const Duration(milliseconds: 500), () {
+      setState(() {
+        isLandscape = true;
+      });
+    });
+  }
+
+  Future<void> _showPortrait() async {
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    Future.delayed(const Duration(milliseconds: 500), () {
+      setState(() {
+        isLandscape = false;
+      });
+    });
   }
 
   @override
-  Widget build(BuildContext context) => _isInProgress
-      ? const SizedBox.shrink()
-      : Scaffold(
-          appBar: widget.appBar,
-          body: SafeArea(
-            child: IndexedStack(
-              index: _isWebviewLoaded,
-              children: [
-                WebView(
-                  initialUrl: Uri.dataFromString(IamportWebView.html,
-                          mimeType: 'text/html')
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: widget.appBar,
+      body: SafeArea(
+        child: IndexedStack(
+          index: _isWebviewLoaded,
+          children: [
+            WebView(
+              initialUrl:
+                  Uri.dataFromString(IamportWebView.html, mimeType: 'text/html')
                       .toString(),
-                  javascriptMode: JavascriptMode.unrestricted,
-                  gestureRecognizers: widget.gestureRecognizers,
-                  userAgent: widget.customUserAgent,
-                  onWebViewCreated: (controller) {
-                    this._webViewController = controller;
-                    if (widget.type == ActionType.payment) {
-                      // 스마일페이, 나이스 실시간 계좌이체
-                      _sub = widget.customPGAction(this._webViewController);
-                    }
-                  },
-                  onPageFinished: (String url) {
-                    // 웹뷰 로딩 완료시에 화면 전환
-                    if (_isWebviewLoaded == 1) {
-                      setState(() {
-                        _isWebviewLoaded = 0;
-                      });
-                    }
-                    // 페이지 로딩 완료시 IMP 코드 실행
-                    if (_isImpLoaded == 0) {
-                      widget.executeJS(this._webViewController);
-                      _isImpLoaded++;
-                    }
-                  },
-                  navigationDelegate: (request) async {
-                    // print("url: " + request.url);
-                    if (widget.isPaymentOver(request.url)) {
-                      String decodedUrl = Uri.decodeComponent(request.url);
-                      widget
-                          .useQueryData(Uri.parse(decodedUrl).queryParameters);
+              javascriptMode: JavascriptMode.unrestricted,
+              gestureRecognizers: widget.gestureRecognizers,
+              userAgent: widget.customUserAgent,
+              onWebViewCreated: (controller) {
+                this._webViewController = controller;
+                if (widget.type == ActionType.payment) {
+                  // 스마일페이, 나이스 실시간 계좌이체
+                  _sub = widget.customPGAction(this._webViewController);
+                }
+              },
+              onPageFinished: (String url) {
+                // 웹뷰 로딩 완료시에 화면 전환
+                if (_isWebviewLoaded == 1) {
+                  setState(() {
+                    _isWebviewLoaded = 0;
+                  });
+                }
+                // 페이지 로딩 완료시 IMP 코드 실행
+                if (_isImpLoaded == 0) {
+                  widget.executeJS(this._webViewController);
+                  _isImpLoaded++;
+                }
+              },
+              navigationDelegate: (request) async {
+                // print("url: " + request.url);
+                if (widget.isPaymentOver(request.url)) {
+                  String decodedUrl = Uri.decodeComponent(request.url);
+                  widget.useQueryData(Uri.parse(decodedUrl).queryParameters);
 
-                      return NavigationDecision.prevent;
-                    }
+                  return NavigationDecision.prevent;
+                }
 
-                    final iamportUrl = IamportUrl(request.url);
-                    if (iamportUrl.isAppLink()) {
-                      // print("appLink: " + iamportUrl.appUrl!);
-                      // 앱 실행 로직을 iamport_url 모듈로 이동
-                      iamportUrl.launchApp();
-                      return NavigationDecision.prevent;
-                    }
+                final iamportUrl = IamportUrl(request.url);
+                if (iamportUrl.isAppLink()) {
+                  // print("appLink: " + iamportUrl.appUrl!);
+                  // 앱 실행 로직을 iamport_url 모듈로 이동
+                  iamportUrl.launchApp();
+                  return NavigationDecision.prevent;
+                }
 
-                    return NavigationDecision.navigate;
-                  },
-                ),
-                if (_isWebviewLoaded == 1) widget.initialChild!,
-              ],
+                return NavigationDecision.navigate;
+              },
             ),
-          ),
-        );
+            if (_isWebviewLoaded == 1) widget.initialChild!,
+          ],
+        ),
+      ),
+    );
+  }
 }
